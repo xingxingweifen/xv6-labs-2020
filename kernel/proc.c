@@ -121,6 +121,15 @@ found:
     return 0;
   }
 
+    kernelPageinit(&p->kernel_page);
+    char *pa = kalloc();
+    if(pa == 0)
+    panic("kalloc");
+    uint64 va = KSTACK((int) (p - proc));
+    if(mappages(p->kernel_page, va, PGSIZE, (uint64)pa, PTE_R | PTE_W) != 0)
+        panic("kvmmap");    
+    p->kstack = va;  
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -128,6 +137,22 @@ found:
   p->context.sp = p->kstack + PGSIZE;
 
   return p;
+}
+
+static void dfs(pagetable_t pagetable, int level){
+    if (level == 3){
+        kfree((void *)pagetable);
+        return;
+    }
+
+    for (int i = 0; i < 512; ++i){
+        pte_t pte = pagetable[i];
+        if (pte & PTE_V){
+            dfs((pagetable_t)(PTE2PA(pte)), level + 1);
+        }
+    }
+
+    kfree((void *)pagetable);
 }
 
 // free a proc structure and the data hanging from it,
@@ -150,6 +175,11 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  //首先应当释放内核栈
+  uvmunmap(p->kernel_page, p->kstack, 1, 1);
+  p->kstack = 0;
+  //释放物理页表，使用kfree
+  dfs(p->kernel_page, 1);
 }
 
 // Create a user page table for a given process,
@@ -243,9 +273,15 @@ growproc(int n)
 
   sz = p->sz;
   if(n > 0){
+    // 加上PLIC限制
+    if (PGROUNDUP(sz + n) >= PLIC){
+      return -1;
+    }
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+    // 复制一份到内核页表
+    u2kvmcopy(p->pagetable, p->kernel_page, sz - n, sz);
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
@@ -274,6 +310,8 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+    // 需要更改，将子进程的pagetable复制到子进程的内核页表中
+    u2kvmcopy(np->pagetable, np->kernel_page, 0, np->sz);
 
   np->parent = p;
 
@@ -473,10 +511,16 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+
+        w_satp(MAKE_SATP(p->kernel_page));
+        sfence_vma();        
+
         swtch(&c->context, &p->context);
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
+        kvminithart();      
+
         c->proc = 0;
 
         found = 1;
