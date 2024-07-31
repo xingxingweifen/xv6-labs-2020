@@ -122,6 +122,7 @@ panic(char *s)
   printf(s);
   printf("\n");
   panicked = 1; // freeze uart output from other CPUs
+  backtrace();
   for(;;)
     ;
 }
@@ -131,4 +132,19 @@ printfinit(void)
 {
   initlock(&pr.lock, "pr");
   pr.locking = 1;
+}
+
+static void dfs(uint64 x, uint64 bootom, uint64 top){
+    if (x >= bootom && x < top){
+        printf("%p\n", *((uint64 *)(x - 8)));
+        dfs(*((uint64 *)(x - 16)), bootom, top);
+    }
+}
+
+void backtrace(void){
+    uint64 x = r_fp();//获得正在执行的函数的fp
+    uint64 top = PGROUNDUP(x);//栈的顶部向上一个地址
+    uint64 bootom = PGROUNDDOWN(x);
+    printf("backtrace:\n");
+    dfs(x, bootom, top);
 }

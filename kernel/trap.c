@@ -43,7 +43,7 @@ usertrap(void)
 
   // send interrupts and exceptions to kerneltrap(),
   // since we're now in the kernel.
-  w_stvec((uint64)kernelvec);
+  w_stvec((uint64)kernelvec);//如出现中断，则转到内核处理中断的函数
 
   struct proc *p = myproc();
   
@@ -77,8 +77,15 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
-    yield();
+  if(which_dev == 2){
+    ++p->diff;
+    if (p->diff == p->ticks && p->ticks != 0){
+        p->trapframeCopy = p->trapframe + 512;
+        memmove(p->trapframeCopy, p->trapframe, sizeof(struct trapframe));
+        p->trapframe->epc = (uint64)p->handler;
+    }
+    yield(); 
+  }
 
   usertrapret();
 }
@@ -94,7 +101,7 @@ usertrapret(void)
   // we're about to switch the destination of traps from
   // kerneltrap() to usertrap(), so turn off interrupts until
   // we're back in user space, where usertrap() is correct.
-  intr_off();
+  intr_off();//关闭中断，因为我们需要将STVEC切换成uservec，若此时内核出现了中断事件的话则会转到uservec执行产生错误
 
   // send syscalls, interrupts, and exceptions to trampoline.S
   w_stvec(TRAMPOLINE + (uservec - trampoline));
