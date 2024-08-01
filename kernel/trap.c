@@ -6,6 +6,11 @@
 #include "proc.h"
 #include "defs.h"
 
+extern struct ref_stru {
+  struct spinlock lock;
+  int cnt[PHYSTOP / PGSIZE];  // 引用计数
+} ref;
+
 struct spinlock tickslock;
 uint ticks;
 
@@ -67,7 +72,14 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else {
+  } else if (r_scause() == 15){
+    //往虚拟内存的写错误
+    //1.判断pte应该存在且PTE_W置0且PTE_COW置1
+    uint64 va = r_stval();//获取出错的虚拟地址
+    if (va >= p->sz || cowpage(p->pagetable, va) != 0 || cowalloc(p->pagetable, PGROUNDDOWN(va)) == 0){
+        p->killed = 1;
+    }
+  }else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
@@ -218,3 +230,65 @@ devintr()
   }
 }
 
+//对va进行检查是否是COW类型
+int cowpage(pagetable_t pagetable, uint64 va){
+    if (va >= MAXVA){
+        return -1;
+    }
+    pte_t *pte = walk(pagetable, va, 0);
+    if (pte == 0){
+        return -1;
+    }
+    if ((*pte & PTE_V) == 0){
+        return -1;
+    }
+    return (*pte & PTE_COW ? 0 : -1);
+}
+
+int krefcnt(void *pa){
+    return ref.cnt[(uint64)pa / PGSIZE];
+}
+
+void *cowalloc(pagetable_t pagetable, uint64 va){
+    if (va % PGSIZE != 0){
+        return 0;
+    }
+
+    uint64 pa = walkaddr(pagetable, va);//获取对应的物理地址
+    if (pa == 0){
+        return 0;       
+    }
+
+    pte_t *pte = walk(pagetable, va, 0);
+
+    if (krefcnt((char *)pa) == 1){
+        //只剩一个进程对此物理地址存在引用
+        //则直接修改对应的PTE即可
+        *pte |= PTE_W;
+        *pte &= ~PTE_COW;
+        return (void *)pa;
+    }
+    //多个进程对物理内存存在引用
+    //需要分配新的页面，并拷贝旧页面的内容
+    char *mem = kalloc();
+    if (mem == 0){
+        return 0;
+    }
+
+    //复制旧页面内容到新页面
+    memmove(mem, (char *)pa, PGSIZE);
+
+    //清除PTE_V否则在mappages中会判定为remap
+    *pte &= ~PTE_V;
+
+    //为新页面添加映射
+    if (mappages(pagetable, va, PGSIZE, (uint64)mem, (PTE_FLAGS(*pte) | PTE_W) & ~PTE_COW) != 0){
+        kfree(mem);
+        *pte |= PTE_V;
+        return 0;
+    }
+
+    kfree((char *)pa);
+
+    return mem;
+}
