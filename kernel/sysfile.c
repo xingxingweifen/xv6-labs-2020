@@ -313,6 +313,30 @@ sys_open(void)
       iunlockput(ip);
       end_op();
       return -1;
+    }else if (ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)){
+        int cnt = 0;
+        //递归读取target直到target的type不是T_SYMLINK
+        while (ip->type == T_SYMLINK && cnt != 10){
+            char target[MAXPATH] = {0};
+            ++cnt;
+            if (readi(ip, 0, (uint64)target, 0, MAXPATH) != MAXPATH){//读取指向的文件
+                iunlockput(ip);
+                end_op();
+                return -1;
+            }
+            iunlockput(ip);
+            if ((ip = namei(target)) == 0){
+                end_op();
+                return -1;
+            }
+            ilock(ip);
+        }
+        //仍然是链接文件
+        if (ip->type == T_SYMLINK){
+            iunlockput(ip);
+            end_op();
+            return -1;
+        }
     }
   }
 
@@ -483,4 +507,33 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+
+uint64 sys_symlink(void){
+    //1.首先获取两个参数变量
+    char target[MAXPATH];
+    char path[MAXPATH];
+    if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+        return -1;
+    //2.在指定path下creat一个文件，分配一个inode，并在该inode的数据域中存入target
+    struct inode *ip = 0;
+    begin_op();
+    ip = create(path, T_SYMLINK, 0, 0);
+    if(ip == 0){//path路径已经存在了
+        end_op();
+        // printf("error1\n");
+        return -1;
+    }
+    ip->size = MAXPATH;
+    //向inode的数据域中存储数据
+    if (writei(ip, 0, (uint64)target, 0, MAXPATH) < MAXPATH){
+        iunlockput(ip);
+        end_op();
+        // printf("error2\n");
+        return -1;
+    }
+
+    iunlockput(ip);
+    end_op();
+    return 0;
 }
